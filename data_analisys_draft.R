@@ -71,3 +71,15 @@ confusionMatrix(crossValid, cross$classe)
 pTest <- predict(preProc,testing[,-118])
 result <- predict(modFit,pTest)
 result
+
+# writing the results for submissions
+pml_write_files = function(x){
+  if (!file.exists("./data/activity.csv")) dir.create("./results")
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("./results/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(result)
