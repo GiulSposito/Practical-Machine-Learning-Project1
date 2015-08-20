@@ -1,0 +1,195 @@
+---
+title: "Human Activity Recognition Exercise"
+subtitle: "Pratical Machine Learning - Course Project"
+author: "Giuliano Sposito"
+date: "August, 2015"
+output: html_document
+---
+
+# Introduction
+
+## Overview
+
+This report describes the data analysis and the model fitting performed as part of [**Pratical Machine Learning** course](https://www.coursera.org/course/predmachlearn), by *John Hopkins Blooberg School of Public Health* at [Coursera](www.coursera.org).
+
+
+## Backgroud on Human Activity Recognition
+
+Using devices such as *Jawbone Up, Nike FuelBand, and Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify **how well they do it**. 
+
+In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. Details of how the data was collected can be found in [this link](http://groupware.les.inf.puc-rio.br/har) at the section on the *Weight Lifting Exercise Dataset*.
+
+The goal of this project is to predict the manner in which they did the exercise, and this report describes the data analysis, pre-processing, model fitting and model evaluation for this goal.
+
+## Strategy
+
+In this analysis we'll do the following steps towards the project goal:
+
+1. **Data Analysis**: To load the datasets and perform some exploratory data analysis;
+1. **Preprocessing**: To clear the datasets and remove NA's values and Non-Significant features;
+1. **Data Partition**: To partition the Training dataset to evaluate the perform of a fitted model through cross validation;
+1. **Training a Model**: To train/fit the model;
+1. **Evaluation**: To evaluate the performance of the fitted model;
+1. **Predict Test Dataset Values**: Lastly, to predict the values of the Test dataset.
+
+# Execution
+
+## Data Analysis
+
+There are two data set, the *Training and the Test dataset*, the cvs data files can be download from:
+
+ * Training data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+ * The test data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+If you want to reproduce this Rmd, you will have download the data into a `./data/` folder in the working directory. 
+
+```{r cache=TRUE, warning=FALSE}
+## setup
+library(caret)
+library(ggplot2)
+library(gridExtra)
+
+## reading data
+training <- read.csv("./data/pml-training.csv", na.strings=c("NA","","#DIV/0!"))
+testing <- read.csv("./data/pml-testing.csv", na.strings=c("NA","","#DIV/0!"))
+
+# the 'result' column
+str(training$classe)
+
+```
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set, the "A" value are the correct way to do the exercise, other values are common errors: throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+Let's starting choosing which `data.frames` columns has only NA's values and that don't make sense to be used in the model training as a valid data feature.
+
+
+```{r cache=TRUE, warning=FALSE}
+# subsetting the dataframeremoving columns with NA values for all row
+nonNA_Cols <- sapply(training, function(x){mean(!is.na(x))}) # % of non NA values in a column
+valid_Cols <- nonNA_Cols > 0 # T -> has some values or F -> only NA values 
+
+# removing Non relevant data: shouldn't be predictors
+valid_Cols[c("X", "user_name","cvtd_timestamp","num_window","new_window")]  <- F
+```
+
+### Understand the TimeStamp information
+
+There are two columns named `raw_timestamp_part`, looking how the datapoints, from one specific case, are distributed for these columns it is possible to verify that they should be unified into a single information for distributing data points adequately in time.
+
+```{r cache=TRUE, warning=FALSE, fig.width=9}
+# understanding the timestamp info
+
+# just one user and class of one of the features (yaw_arm)
+# to see how is the behavior of timestamp parts
+dt <- training[training$classe=="E" & training$user_name=="adelmo",] 
+
+g1 <- qplot(dt$raw_timestamp_part_1,dt$yaw_arm) + ggtitle("Timestamp Part 1") + xlab("Raw Timestamp Part 1") + ylab("yaw_arm")
+g2 <- qplot(dt$raw_timestamp_part_2,dt$yaw_arm) + ggtitle("Timestamp Parte 2")+ xlab("Raw Timestamp Part 2") + ylab("yaw_arm")
+grid.arrange(g1, g2, ncol=2)
+
+```
+
+We can see there is several datapoint at same `raw_timestamp_part_1`, so we have to sum the two parts. 
+
+```{r cache=TRUE,warning=TRUE}
+# see the maximum value, so this is the 'magnitude'
+# of the part 1 in respect to part 2
+max(dt$raw_timestamp_part_2) 
+
+# testing the sum of the two datasets
+new_timestamp <- dt$raw_timestamp_part_1*1000000+dt$raw_timestamp_part_2
+qplot(new_timestamp,dt$yaw_arm)+ ggtitle("New Timestamp") + xlab("Timestamp") + ylab("yaw_arm")
+```
+
+Now, we can see that the time information is correct. Let's apply this transformation in the `Training` and `Test` datasets.
+
+```{r cache=TRUE, warning=FALSE}
+# adjusting the datasets
+training_timestamp <- training$raw_timestamp_part_1*1000000+training$raw_timestamp_part_2
+testing_timestamp <- testing$raw_timestamp_part_1*1000000+testing$raw_timestamp_part_2
+valid_Cols[c("raw_timestamp_part_1","raw_timestamp_part_2")] <- F
+```
+
+## Preprocessing
+
+Now, we'll apply some basic preprocessing in both datasets, first removing the full NA's columns and the non relevant data (the columns wehre `valid_Cols` are `FALSE`), and after, removing the Near Zero Variance columns.
+
+We will also normalizing the remaining data, but this will be done after partition of the training dataset in the next session.
+
+```{r cache=TRUE, warning=FALSE}
+# subsetting columns and adding the new timestamp info
+training <- training[,which(valid_Cols==T)]
+training$timestamp <- training_timestamp
+testing <- testing[,which(valid_Cols==T)]
+testing$timestamp <- testing_timestamp
+
+# Near Zero Variance
+nZeroVar <- nearZeroVar(training,saveMetrics=T)
+nZeroVar[nZeroVar$nzv==T,]
+
+# subsetting bya NZV
+training <- training[,nZeroVar$nzv==F]
+testing <- testing[,nZeroVar$nzv==F]
+```
+
+## Partition of Training Dataset
+
+To perform the cross validation of the prediction model after training, we'll partition the training dataset.
+
+```{r cache=TRUE, warning=FALSE}
+# partition in the training set (Cross Validation)
+set.seed(1234)
+inTrain <- createDataPartition(training$classe, p=.75, list=F)
+train <- training[inTrain,]
+cross <- training[-inTrain,]
+```
+
+Lastly, we'll normalize the partitions
+
+```{r cache=TRUE, warning=FALSE}
+# normalizing the Training subset
+preProc <- preProcess(train[,-118],method=c("knnImpute", "center", "scale"))
+pTrain <- predict(preProc,train[,-118])
+pTrain$classe <- train$classe
+
+# normalizing the Cross Validation subset
+pCross <- predict(preProc,cross[,-118])
+```
+
+Now we have two new datasets:
+
+* `pTrain`: a normalized partition of original Training dataset that will be used to train the model
+* `pCross`: a normalized partition of original Training dataset to be used as 'cross validation' dataset to evaluate the performance of the trained model
+
+## Training a Model
+
+At this stage, we'll train a model using `randon forrest` algorithm with settings to make the training task duration shorter.
+
+```{r cache=TRUE,warning=FALSE}
+# training a model
+modFit <- train(classe~., method="rf", data=pTrain, allowParallel=T, ncores=4, nodesize=10, importance=F,  proximity=F, trControl=trainControl(method="cv"))
+modFit
+```
+
+## Evaluation
+
+To evaluate the performance of the model, we apply it in the cross validation dataset and check the results of prediction against the real values
+
+```{r cache=TRUE, warning=FALSE}
+# predict and evaluation
+crossValid <- predict(modFit, pCross)
+confusionMatrix(crossValid, cross$classe)
+```
+
+We can see that the model obtain a very good performance, according the `confusion matrix`.
+
+# Predict Test Dataset Values
+
+The last step of this project is to generate the classification of Testing data set, predicting the way that the subject did the exercise (the values of "classe" variable).
+
+```{r cache=TRUE, warning=FALSE}
+# predicting test set
+pTest <- predict(preProc,testing[,-118])
+result <- predict(modFit,pTest)
+result
+```
